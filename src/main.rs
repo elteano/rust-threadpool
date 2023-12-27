@@ -4,6 +4,7 @@
 // Each thread waits on the lock to grab work until work is available, grabs the next task,
 // releases the lock, and completes th work
 
+use std::any::{Any, TypeId};
 use std::thread;
 use std::collections::LinkedList;
 use std::marker::{Send, Sync};
@@ -15,7 +16,7 @@ use std::thread::JoinHandle;
 struct TaskHandle<T>
 {
     /// Channel receiver which obtains the result of the function executing.
-    recv: Receiver<T>,
+    recv: Receiver<Box<dyn Any>>,
 
     /// The only way to test for completion is to poll the channel, so we will save the result for
     /// the appropriate `close_join` call.
@@ -28,7 +29,7 @@ impl<T> TaskHandle<T>
 {
     /// Generates a new TaskHandle which will listen for the given receive channel. To be used only
     /// by the ThreadPool implementation.
-    fn new(rec: Receiver<T>) -> Self
+    fn new(rec: Receiver<Box<dyn Any>>) -> Self
     {
         Self
         {
@@ -45,7 +46,12 @@ impl<T> TaskHandle<T>
         let mut res = self.cache_result.is_some();
         if !res
         {
-            self.cache_result = self.recv.try_recv().ok();
+            let rv = self.recv.try_recv().ok();
+            if let Some(val) = rv
+            {
+                self.cache_result = Some(val.downcast::<T>().unwrap());
+            }
+            //self.cache_result = self.recv.try_recv().ok();
             res = self.cache_result.is_some();
         }
         return res;
@@ -62,11 +68,11 @@ impl<T> TaskHandle<T>
     }
 }
 
-struct ThreadPool<O>
+struct ThreadPool
 {
     /// The communication channel to all of our threads. Send pointers to functions, a flag to keep
     /// alive, and a condition variable to wake everything up.
-    input_queue: Arc<(Mutex<(LinkedList<(Sender<O>, Box<dyn FnOnce() -> O + Send + Sync>)>, bool)>, Condvar)>,
+    input_queue: Arc<(Mutex<(LinkedList<(Sender<Box<dyn Any>>, Box<dyn FnOnce() -> Box<(dyn Any + Send + Sync)>>)>, bool)>, Condvar)>,
 
     // No particular need to keep this around, but I do anyway.
     // Might add a 'refresh' method to ensure that threads are still alive to process tasks when a
@@ -86,7 +92,7 @@ struct ThreadPool<O>
 ///
 /// The thread pool does not currently have a means to handle tasks that panic during execution, so
 /// avoid writing unsafe code.
-impl<O: Send + 'static> ThreadPool<O>
+impl ThreadPool
 {
     fn new(workers:usize) -> Self
     {
@@ -128,7 +134,7 @@ impl<O: Send + 'static> ThreadPool<O>
 
                         // This will respond with an Error if the other end has hung up. We do not
                         // want to poison ourselves if this happens, so we ignore issues
-                        let _ = csend.send(res);
+                        let _ = csend.send(Box::new(res) as Box<dyn Any>);
                     }
                 }
             });
@@ -137,16 +143,17 @@ impl<O: Send + 'static> ThreadPool<O>
         return s;
     }
 
-    fn queue_fun<F: FnOnce() -> O + Send + Sync + 'static>(&self, fun: F) -> TaskHandle<O>
+    fn queue_fun<T, F: FnOnce() -> T + Send + Sync + 'static>(&self, fun: F) -> TaskHandle<T>
     {
         let (sender, receiver) = channel();
         let (lock, cv) = &(*self.input_queue);
         let mut qh = lock.lock().unwrap();
-        qh.0.push_back((sender, Box::new(fun)));
+        qh.0.push_back((sender, Box::new(fun) as Box<(dyn FnOnce() -> Box<(dyn Any + Send + Sync + 'static)>)>));
         cv.notify_one();
         return TaskHandle::new(receiver);
     }
 
+    /*
     fn queue_many<F: FnOnce() -> O + Send + Sync + 'static>(&self, mut func_list: Vec<F>)
         -> Vec<TaskHandle<O>>
     {
@@ -164,6 +171,7 @@ impl<O: Send + 'static> ThreadPool<O>
         cv.notify_all();
         return res;
     }
+    */
 
     /// Signals all threads to stop, but does not block to ensure they are destroyed prior to
     /// continuing.
