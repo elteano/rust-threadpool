@@ -43,7 +43,6 @@ impl<T: Send + Sync + 'static> TaskHandle<T>
     /// avoid blocking.
     pub fn is_finished(&mut self) -> bool
     {
-        println!("wait called with type {}", std::any::type_name::<T>());
         let mut res = self.cache_result.is_some();
         if !res
         {
