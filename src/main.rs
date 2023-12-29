@@ -230,7 +230,7 @@ fn main()
     let a = h1.wait_get().expect("just go");
     let b = h2.wait_get().expect("just go");
 
-    let mut m: Vec<TaskHandle<i32>> = (1..100).map(|a| tp.queue_fun(move || { a * a } )).collect();
+    let mut m: Vec<TaskHandle<i32>> = (1..10).map(|a| tp.queue_fun(move || { a * a } )).collect();
 
     println!("{}", m.iter_mut().all(|h| h.is_finished()));
 
