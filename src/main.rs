@@ -173,25 +173,23 @@ impl ThreadPool
         return TaskHandle::new(receiver);
     }
 
-    /*
-    fn queue_many<F: FnOnce() -> O + Send + Sync + 'static>(&self, mut func_list: Vec<F>)
-        -> Vec<TaskHandle<O>>
+    fn queue_many<T: Send + Sync + 'static, F: (FnOnce() -> T) + Send + Sync + 'static>(&self, mut func_list: Vec<F>)
+        -> Vec<TaskHandle<T>>
     {
         let (lock, cv) = &(*self.input_queue);
-        let (sends, mut recvs): (Vec<Sender<O>>, Vec<Receiver<O>>)
+        let (sends, mut recvs): (Vec<_>, Vec<_>)
                              = (0..func_list.len()).map(|_| channel()).unzip();
         let boxed = func_list.drain(..)
-            .map(|f| Box::new(f) as Box<(dyn FnOnce() -> O + Send + Sync + 'static)>);
+            .map(|f| Box::new(move || { Box::new(f()) as Box<(dyn Any + Send + Sync + 'static)> }) as Box<(dyn FnOnce() -> Box<(dyn Any + Send + Sync + 'static)> + Send + Sync + 'static)>);
         let pairs = zip(sends, boxed);
 
         let mut qh = lock.lock().unwrap();
         pairs.for_each(|i| qh.0.push_back(i));
-        let res: Vec<TaskHandle<O>> = recvs.drain(..)
+        let res: Vec<TaskHandle<T>> = recvs.drain(..)
             .map(|r| TaskHandle::new(r)).collect();
         cv.notify_all();
         return res;
     }
-    */
 
     /// Signals all threads to stop, but does not block to ensure they are destroyed prior to
     /// continuing.
@@ -239,6 +237,14 @@ fn main()
     let col: Vec<i32> = m.drain(..).map(|h| h.wait_get().expect("just go")).collect();
 
     for item in col
+    {
+        println!("{item}");
+    }
+
+    let mut qms = tp.queue_many((1..4).map(|_| { || { 4 + 4 } }).collect());
+
+    let res: Vec<_> = qms.drain(..).map(|h| h.wait_get().expect("result")).collect();
+    for item in res
     {
         println!("{item}");
     }
