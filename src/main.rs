@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 struct TaskHandle<T>
 {
     /// Channel receiver which obtains the result of the function executing.
-    recv: Receiver<Box<dyn Any>>,
+    recv: Receiver<Box<dyn Any + Send + Sync>>,
 
     /// The only way to test for completion is to poll the channel, so we will save the result for
     /// the appropriate `close_join` call.
@@ -25,11 +25,11 @@ struct TaskHandle<T>
 
 /// Handle for receiving the value of a function passed to a ThreadPool. Intended to align with
 /// JoinHandle in std::thread.
-impl<T> TaskHandle<T>
+impl<T: Send + Sync + 'static> TaskHandle<T>
 {
     /// Generates a new TaskHandle which will listen for the given receive channel. To be used only
     /// by the ThreadPool implementation.
-    fn new(rec: Receiver<Box<dyn Any>>) -> Self
+    fn new(rec: Receiver<Box<dyn Any + Send + Sync>>) -> Self
     {
         Self
         {
@@ -43,13 +43,18 @@ impl<T> TaskHandle<T>
     /// avoid blocking.
     pub fn is_finished(&mut self) -> bool
     {
+        println!("wait called with type {}", std::any::type_name::<T>());
         let mut res = self.cache_result.is_some();
         if !res
         {
             let rv = self.recv.try_recv().ok();
             if let Some(val) = rv
             {
-                self.cache_result = Some(val.downcast::<T>().unwrap());
+                if val.type_id() == TypeId::of::<T>()
+                {
+                    println!("Type panic!");
+                }
+                self.cache_result = Some(*val.downcast::<T>().unwrap());
             }
             //self.cache_result = self.recv.try_recv().ok();
             res = self.cache_result.is_some();
@@ -63,16 +68,27 @@ impl<T> TaskHandle<T>
         match self.cache_result
         {
             Some(a) => { Ok(a) }
-            None => { Ok(self.recv.recv().unwrap()) }
+            None => {
+                let item = self.recv.recv().unwrap();
+                if (&*item).type_id() != TypeId::of::<T>()
+                {
+                    println!("Type panic! Expected {}", std::any::type_name::<T>());
+                }
+                Ok(*item.downcast::<T>().expect("type should always match"))
+            }
         }
     }
+}
+
+struct TaskItem
+{
 }
 
 struct ThreadPool
 {
     /// The communication channel to all of our threads. Send pointers to functions, a flag to keep
     /// alive, and a condition variable to wake everything up.
-    input_queue: Arc<(Mutex<(LinkedList<(Sender<Box<dyn Any>>, Box<dyn FnOnce() -> Box<(dyn Any + Send + Sync)>>)>, bool)>, Condvar)>,
+    input_queue: Arc<(Mutex<(LinkedList<(Sender<Box<dyn Any + Send + Sync>>, Box<dyn FnOnce() -> Box<(dyn Any + Send + Sync)> + Send + Sync + 'static>)>, bool)>, Condvar)>,
 
     // No particular need to keep this around, but I do anyway.
     // Might add a 'refresh' method to ensure that threads are still alive to process tasks when a
@@ -130,11 +146,9 @@ impl ThreadPool
                     }
                     if let Some((csend, func)) = next_pair
                     {
-                        let res = func();
-
                         // This will respond with an Error if the other end has hung up. We do not
                         // want to poison ourselves if this happens, so we ignore issues
-                        let _ = csend.send(Box::new(res) as Box<dyn Any>);
+                        let _ = csend.send(func());
                     }
                 }
             });
@@ -143,12 +157,18 @@ impl ThreadPool
         return s;
     }
 
-    fn queue_fun<T, F: FnOnce() -> T + Send + Sync + 'static>(&self, fun: F) -> TaskHandle<T>
+    fn queue_fun<T: Send + Sync + 'static, F: (FnOnce() -> T) + Send + Sync + 'static>(&self, fun: F) -> TaskHandle<T>
     {
         let (sender, receiver) = channel();
         let (lock, cv) = &(*self.input_queue);
         let mut qh = lock.lock().unwrap();
-        qh.0.push_back((sender, Box::new(fun) as Box<(dyn FnOnce() -> Box<(dyn Any + Send + Sync + 'static)>)>));
+        qh.0.push_back(
+            (sender,
+             Box::new(move || {
+                 Box::new(fun()) as Box<(dyn Any + Send + Sync + 'static)>
+             }) as Box<(dyn FnOnce() -> Box<(dyn Any + Send + Sync + 'static)> + Send + Sync + 'static)>
+            )
+            );
         cv.notify_one();
         return TaskHandle::new(receiver);
     }
